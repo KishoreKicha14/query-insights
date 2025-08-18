@@ -1,9 +1,5 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
- *
- * The OpenSearch Contributors require contributions made to
- * this file be licensed under the Apache-2.0 license or a
- * compatible open source license.
  */
 
 package org.opensearch.plugin.insights.core.listener;
@@ -19,6 +15,8 @@ import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getT
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNSizeSetting;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNWindowSizeSetting;
 
+import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -28,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.search.SearchPhaseContext;
@@ -51,12 +50,10 @@ import org.opensearch.plugin.insights.settings.QueryInsightsSettings;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.tasks.Task;
 import reactor.util.annotation.NonNull;
+import java.util.ArrayList;
+import java.util.Comparator;
 
-/**
- * The listener for query insights services.
- * It forwards query-related data to the appropriate query insights stores,
- * either for each request or for each phase.
- */
+
 public final class QueryInsightsListener extends SearchRequestOperationsListener {
 
     private static final Logger log = LogManager.getLogger(QueryInsightsListener.class);
@@ -68,12 +65,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     private final QueryShapeGenerator queryShapeGenerator;
     private Set<Pattern> excludedIndicesPattern;
 
-    /**
-     * Constructor for QueryInsightsListener
-     *
-     * @param clusterService       The Node's cluster service.
-     * @param queryInsightsService The topQueriesByLatencyService associated with this listener
-     */
     @Inject
     public QueryInsightsListener(final ClusterService clusterService, final QueryInsightsService queryInsightsService) {
         this(clusterService, queryInsightsService, false);
@@ -81,13 +72,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         groupingFieldTypeEnabled = false;
     }
 
-    /**
-     * Constructor for QueryInsightsListener
-     *
-     * @param clusterService       The Node's cluster service.
-     * @param queryInsightsService The topQueriesByLatencyService associated with this listener
-     * @param initiallyEnabled Is the listener initially enabled/disabled
-     */
     public QueryInsightsListener(
         final ClusterService clusterService,
         final QueryInsightsService queryInsightsService,
@@ -99,8 +83,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         this.queryShapeGenerator = new QueryShapeGenerator(clusterService);
         queryInsightsService.setQueryShapeGenerator(queryShapeGenerator);
 
-        // Setting endpoints set up for top n queries, including enabling top n queries, window size, and top n size
-        // Expected metricTypes are Latency, CPU, and Memory.
         for (MetricType type : MetricType.allMetricTypes()) {
             clusterService.getClusterSettings()
                 .addSettingsUpdateConsumer(getTopNEnabledSetting(type), v -> this.setEnableTopQueries(type, v));
@@ -124,7 +106,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             this.queryInsightsService.setWindowSize(type, clusterService.getClusterSettings().get(getTopNWindowSizeSetting(type)));
         }
 
-        // Settings endpoints set for grouping top n queries
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(
                 TOP_N_QUERIES_GROUP_BY,
@@ -152,17 +133,17 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         validateExcludedIndices(clusterService.getClusterSettings().get(TOP_N_QUERIES_EXCLUDED_INDICES));
         setExcludedIndices(clusterService.getClusterSettings().get(TOP_N_QUERIES_EXCLUDED_INDICES));
 
-        // Internal settings for grouping attributes
         clusterService.getClusterSettings().addSettingsUpdateConsumer(TOP_N_QUERIES_GROUPING_FIELD_NAME, this::setGroupingFieldNameEnabled);
         setGroupingFieldNameEnabled(clusterService.getClusterSettings().get(TOP_N_QUERIES_GROUPING_FIELD_NAME));
 
         clusterService.getClusterSettings().addSettingsUpdateConsumer(TOP_N_QUERIES_GROUPING_FIELD_TYPE, this::setGroupingFieldTypeEnabled);
         setGroupingFieldTypeEnabled(clusterService.getClusterSettings().get(TOP_N_QUERIES_GROUPING_FIELD_TYPE));
 
-        // Settings endpoints set for search query metrics
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(SEARCH_QUERY_METRICS_ENABLED_SETTING, this::setSearchQueryMetricsEnabled);
         setSearchQueryMetricsEnabled(clusterService.getClusterSettings().get(SEARCH_QUERY_METRICS_ENABLED_SETTING));
+
+        log.info("[INSIGHTS][coord] QueryInsightsListener initialized; enabled={}", super.isEnabled());
     }
 
     private void setExcludedIndices(List<String> excludedIndices) {
@@ -172,46 +153,26 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             .collect(Collectors.toSet());
     }
 
-    /**
-     * Enable or disable top queries insights collection for {@link MetricType}.
-     * This function will enable or disable the corresponding listeners
-     * and query insights services.
-     *
-     * @param metricType {@link MetricType}
-     * @param isCurrentMetricEnabled boolean
-     */
     public void setEnableTopQueries(final MetricType metricType, final boolean isCurrentMetricEnabled) {
         this.queryInsightsService.enableCollection(metricType, isCurrentMetricEnabled);
+        log.info("[INSIGHTS][coord] topN toggle metric={} enabled={}", metricType, isCurrentMetricEnabled);
         updateQueryInsightsState();
     }
 
-    /**
-     * Set search query metrics enabled to enable collection of search query categorization metrics.
-     * @param searchQueryMetricsEnabled boolean flag
-     */
     public void setSearchQueryMetricsEnabled(boolean searchQueryMetricsEnabled) {
         this.queryInsightsService.enableSearchQueryMetricsFeature(searchQueryMetricsEnabled);
         updateQueryInsightsState();
     }
 
-    public void setGroupingFieldNameEnabled(Boolean fieldNameEnabled) {
-        this.groupingFieldNameEnabled = fieldNameEnabled;
-    }
+    public void setGroupingFieldNameEnabled(Boolean fieldNameEnabled) { this.groupingFieldNameEnabled = fieldNameEnabled; }
 
-    public void setGroupingFieldTypeEnabled(Boolean fieldTypeEnabled) {
-        this.groupingFieldTypeEnabled = fieldTypeEnabled;
-    }
+    public void setGroupingFieldTypeEnabled(Boolean fieldTypeEnabled) { this.groupingFieldTypeEnabled = fieldTypeEnabled; }
 
-    /**
-     * Update the query insights service state based on the enabled features.
-     * If any feature is enabled, it starts the service. If no features are enabled, it stops the service.
-     */
     private void updateQueryInsightsState() {
         boolean anyFeatureEnabled = queryInsightsService.isAnyFeatureEnabled();
-
         if (anyFeatureEnabled && !super.isEnabled()) {
             super.setEnabled(true);
-            queryInsightsService.stop(); // Ensures a clean restart
+            queryInsightsService.stop();
             queryInsightsService.start();
         } else if (!anyFeatureEnabled && super.isEnabled()) {
             super.setEnabled(false);
@@ -220,18 +181,38 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
     @Override
-    public boolean isEnabled() {
-        return super.isEnabled();
+    public boolean isEnabled() { return super.isEnabled(); }
+
+    private static String phaseName(SearchPhaseContext ctx) {
+        try { return String.valueOf(ctx.getCurrentPhase().getName()); } catch (Throwable t) { return "unknown"; }
     }
 
     @Override
-    public void onPhaseStart(SearchPhaseContext context) {}
+    public void onPhaseStart(SearchPhaseContext context) {
+        if (!queryInsightsService.isAnyFeatureEnabled()) return;
+        final String phase = phaseName(context);
+        final long reqId = context.getTask().getId();
+
+        var starts = new ArrayList<>(queryInsightsService.snapshotOpenStarts(reqId, phase));
+        starts.sort(Comparator.comparing(s -> s.shardId.toString()));
+    }
 
     @Override
-    public void onPhaseEnd(SearchPhaseContext context, SearchRequestContext searchRequestContext) {}
+    public void onPhaseEnd(SearchPhaseContext context, SearchRequestContext searchRequestContext) {
+        if (!queryInsightsService.isAnyFeatureEnabled()) return;
+        final String phase = phaseName(context);
+        final long reqId = context.getTask().getId();
+        var spans = new ArrayList<>(queryInsightsService.snapshotShardPhaseSpans(reqId, phase));
+        spans.sort(Comparator.comparing(sp -> sp.shardId.toString()));
+    }
 
     @Override
-    public void onPhaseFailure(SearchPhaseContext context, Throwable cause) {}
+    public void onPhaseFailure(SearchPhaseContext context, Throwable cause) {
+        if (!queryInsightsService.isAnyFeatureEnabled()) return;
+        final String phase = phaseName(context);
+        final long reqId = context.getTask().getId();
+        var spans = queryInsightsService.drainShardPhaseSpans(reqId, phase);
+    }
 
     @Override
     public void onRequestStart(SearchRequestContext searchRequestContext) {}
@@ -239,6 +220,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     @Override
     public void onRequestEnd(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
         constructSearchQueryRecord(context, searchRequestContext);
+        queryInsightsService.clearForRequest(context.getTask().getId());
     }
 
     @Override
@@ -247,7 +229,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
     private boolean skipSearchRequest(final SearchRequestContext searchRequestContext) {
-        // Skip profile queries
         if (Optional.ofNullable(searchRequestContext)
             .map(SearchRequestContext::getRequest)
             .map(SearchRequest::source)
@@ -260,23 +241,24 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             return false;
         }
 
-        return Optional.ofNullable(searchRequestContext)
+        boolean skip = Optional.ofNullable(searchRequestContext)
             .map(SearchRequestContext::getSuccessfulSearchShardIndices)
             .map(indices -> indices.stream().map(Index::getName).anyMatch(this::matchedExcludedIndices))
             .orElse(false);
+
+        if (skip) {
+            log.debug("[INSIGHTS][coord] skip record: excluded indices matched");
+        }
+        return skip;
     }
 
     private boolean matchedExcludedIndices(String indexName) {
-        if (indexName == null || excludedIndicesPattern == null) {
-            return false;
-        }
+        if (indexName == null || excludedIndicesPattern == null) { return false; }
         return excludedIndicesPattern.stream().anyMatch(pattern -> pattern.matcher(indexName).matches());
     }
 
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
-        if (skipSearchRequest(searchRequestContext)) {
-            return;
-        }
+        if (skipSearchRequest(searchRequestContext)) { return; }
 
         SearchTask searchTask = context.getTask();
         List<TaskResourceInfo> tasksResourceUsages = searchRequestContext.getPhaseResourceUsage();
@@ -293,22 +275,12 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         final SearchRequest request = context.getRequest();
         try {
             Map<MetricType, Measurement> measurements = new HashMap<>();
-            measurements.put(
-                MetricType.LATENCY,
-                new Measurement(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - searchRequestContext.getAbsoluteStartNanos()))
-            );
-            measurements.put(
-                MetricType.CPU,
-                new Measurement(
-                    tasksResourceUsages.stream().map(a -> a.getTaskResourceUsage().getCpuTimeInNanos()).mapToLong(Long::longValue).sum()
-                )
-            );
-            measurements.put(
-                MetricType.MEMORY,
-                new Measurement(
-                    tasksResourceUsages.stream().map(a -> a.getTaskResourceUsage().getMemoryInBytes()).mapToLong(Long::longValue).sum()
-                )
-            );
+            long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - searchRequestContext.getAbsoluteStartNanos());
+            measurements.put(MetricType.LATENCY, new Measurement(tookMs));
+            long cpu = tasksResourceUsages.stream().map(a -> a.getTaskResourceUsage().getCpuTimeInNanos()).mapToLong(Long::longValue).sum();
+            long mem = tasksResourceUsages.stream().map(a -> a.getTaskResourceUsage().getMemoryInBytes()).mapToLong(Long::longValue).sum();
+            measurements.put(MetricType.CPU, new Measurement(cpu));
+            measurements.put(MetricType.MEMORY, new Measurement(mem));
 
             Map<Attribute, Object> attributes = new HashMap<>();
             attributes.put(Attribute.SEARCH_TYPE, request.searchType().toString().toLowerCase(Locale.ROOT));
@@ -322,20 +294,15 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             attributes.put(Attribute.TOP_N_QUERY, new HashMap<>(DEFAULT_TOP_N_QUERY_MAP));
 
             if (queryInsightsService.isGroupingEnabled() || log.isTraceEnabled()) {
-                // Generate the query shape only if grouping is enabled or trace logging is enabled
                 final String queryShape = queryShapeGenerator.buildShape(
                     request.source(),
                     groupingFieldNameEnabled,
                     groupingFieldTypeEnabled,
                     searchRequestContext.getSuccessfulSearchShardIndices()
                 );
-
-                // Print the query shape if tracer is enabled
                 if (log.isTraceEnabled()) {
-                    log.trace("Query Shape:\n{}", queryShape);
+                    log.trace("[INSIGHTS][coord] Query Shape:\n{}", queryShape);
                 }
-
-                // Add hashcode attribute when grouping is enabled
                 if (queryInsightsService.isGroupingEnabled()) {
                     String hashcode = queryShapeGenerator.getShapeHashCodeAsString(queryShape);
                     attributes.put(Attribute.QUERY_GROUP_HASHCODE, hashcode);
@@ -343,37 +310,28 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             }
 
             Map<String, Object> labels = new HashMap<>();
-            // Retrieve user provided label if exists
             String userProvidedLabel = context.getTask().getHeader(Task.X_OPAQUE_ID);
-            if (userProvidedLabel != null) {
-                labels.put(Task.X_OPAQUE_ID, userProvidedLabel);
-            }
+            if (userProvidedLabel != null) { labels.put(Task.X_OPAQUE_ID, userProvidedLabel); }
             attributes.put(Attribute.LABELS, labels);
-            // construct SearchQueryRecord from attributes and measurements
+
             SearchQueryRecord record = new SearchQueryRecord(request.getOrCreateAbsoluteStartMillis(), measurements, attributes);
             queryInsightsService.addRecord(record);
+
+            log.info("[INSIGHTS][coord] RECORDED reqId={} tookMs={} cpuNanos={} memBytes={}",
+                context.getTask().getId(), tookMs, cpu, mem);
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
             log.error(String.format(Locale.ROOT, "fail to ingest query insight data, error: %s", e));
         }
     }
 
-    /**
-     * Validate the index name for excluded indices
-     * @param excludedIndices list of index to validate
-     */
     public void validateExcludedIndices(@NonNull List<String> excludedIndices) {
         for (String index : excludedIndices) {
-            if (index == null) {
-                throw new IllegalArgumentException("Excluded index name cannot be null.");
-            }
-            if (index.isBlank()) {
-                throw new IllegalArgumentException("Excluded index name cannot be blank.");
-            }
+            if (index == null) { throw new IllegalArgumentException("Excluded index name cannot be null."); }
+            if (index.isBlank()) { throw new IllegalArgumentException("Excluded index name cannot be blank."); }
             if (index.chars().anyMatch(Character::isUpperCase)) {
                 throw new IllegalArgumentException("Index name must be lowercase.");
             }
         }
     }
-
 }

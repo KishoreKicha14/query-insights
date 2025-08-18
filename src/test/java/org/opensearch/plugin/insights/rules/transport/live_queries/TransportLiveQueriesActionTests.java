@@ -54,6 +54,8 @@ import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.ClusterAdminClient;
+import org.opensearch.plugin.insights.core.service.QueryInsightsService;
+import static org.mockito.ArgumentMatchers.anyLong;
 
 /**
  * Unit tests for the {@link TransportLiveQueriesAction} class.
@@ -71,6 +73,22 @@ public class TransportLiveQueriesActionTests extends OpenSearchTestCase {
     private ActionFilters actionFilters;
     private AdminClient adminClient;
     private ClusterAdminClient clusterAdminClient;
+    private QueryInsightsService insights;
+    private Map<String, List<Map<String, Object>>> sampleTimelines() {
+        Map<String, List<Map<String, Object>>> m = new HashMap<>();
+        List<Map<String, Object>> q = new java.util.ArrayList<>();
+        Map<String, Object> one = new HashMap<>();
+        one.put("shard", "t1[0]");
+        one.put("node_id", "n1");
+        one.put("start_ms", 1L);
+        one.put("end_ms", 2L);
+        q.add(one);
+        m.put("query", q);
+        m.put("fetch", java.util.Collections.emptyList());
+        m.put("expand", java.util.Collections.emptyList());
+        return m;
+    }
+
 
     @Before
     public void setup() {
@@ -82,6 +100,7 @@ public class TransportLiveQueriesActionTests extends OpenSearchTestCase {
         client = mock(Client.class, org.mockito.Answers.RETURNS_DEEP_STUBS); // Use deep stubs for client.admin().cluster()
         actionFilters = mock(ActionFilters.class);
         when(actionFilters.filters()).thenReturn(new org.opensearch.action.support.ActionFilter[0]);
+        insights = mock(QueryInsightsService.class);
 
         node1 = new DiscoveryNode("node1", buildNewFakeTransportAddress(), emptyMap(), emptySet(), VersionUtils.randomVersion(random()));
         node2 = new DiscoveryNode("node2", buildNewFakeTransportAddress(), emptyMap(), emptySet(), VersionUtils.randomVersion(random()));
@@ -98,8 +117,9 @@ public class TransportLiveQueriesActionTests extends OpenSearchTestCase {
         clusterAdminClient = mock(ClusterAdminClient.class);
         when(client.admin()).thenReturn(adminClient);
         when(adminClient.cluster()).thenReturn(clusterAdminClient);
+        when(insights.snapshotShardTimelines(anyLong())).thenReturn(sampleTimelines());
 
-        transportLiveQueriesAction = new TransportLiveQueriesAction(transportService, client, actionFilters);
+        transportLiveQueriesAction = new TransportLiveQueriesAction(transportService, client, actionFilters, insights);
     }
 
     private TaskInfo createTaskInfo(
@@ -186,6 +206,8 @@ public class TransportLiveQueriesActionTests extends OpenSearchTestCase {
         SearchQueryRecord record2 = resultsById.get(task2.getTaskId().toString());
         assertEquals(task2.getStartTime(), record2.getTimestamp());
         assertEquals("desc2", record2.getAttributes().get(Attribute.DESCRIPTION));
+        assertNotNull(record1.getAttributes().get(Attribute.SHARD_TIMELINES));
+
     }
 
     public void testNodeFiltering_SpecificNode() throws IOException {
@@ -227,6 +249,8 @@ public class TransportLiveQueriesActionTests extends OpenSearchTestCase {
         SearchQueryRecord record2 = records.get(0);
         assertEquals(task2.getTaskId().toString(), record2.getId());
         assertEquals("desc2", record2.getAttributes().get(Attribute.DESCRIPTION));
+        assertNotNull(record1.getAttributes().get(Attribute.SHARD_TIMELINES));
+
     }
 
     public void testNodeOperationNonVerbose() throws IOException {

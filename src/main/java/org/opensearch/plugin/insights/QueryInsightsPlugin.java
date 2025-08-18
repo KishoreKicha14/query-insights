@@ -27,19 +27,24 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.index.IndexModule;
+import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.plugin.insights.core.exporter.QueryInsightsExporterFactory;
 import org.opensearch.plugin.insights.core.listener.QueryInsightsListener;
+import org.opensearch.plugin.insights.core.listener.ShardTapListener;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetricsCounter;
 import org.opensearch.plugin.insights.core.reader.QueryInsightsReaderFactory;
 import org.opensearch.plugin.insights.core.service.QueryInsightsService;
 import org.opensearch.plugin.insights.rules.action.health_stats.HealthStatsAction;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesAction;
+import org.opensearch.plugin.insights.rules.action.shard_phase_event.InsightsShardPhaseEventAction;
 import org.opensearch.plugin.insights.rules.action.top_queries.TopQueriesAction;
 import org.opensearch.plugin.insights.rules.resthandler.health_stats.RestHealthStatsAction;
 import org.opensearch.plugin.insights.rules.resthandler.live_queries.RestLiveQueriesAction;
 import org.opensearch.plugin.insights.rules.resthandler.top_queries.RestTopQueriesAction;
 import org.opensearch.plugin.insights.rules.transport.health_stats.TransportHealthStatsAction;
 import org.opensearch.plugin.insights.rules.transport.live_queries.TransportLiveQueriesAction;
+import org.opensearch.plugin.insights.rules.transport.shard_phase_event.TransportInsightsShardPhaseEventAction;
 import org.opensearch.plugin.insights.rules.transport.top_queries.TransportTopQueriesAction;
 import org.opensearch.plugin.insights.settings.QueryCategorizationSettings;
 import org.opensearch.plugin.insights.settings.QueryInsightsSettings;
@@ -62,6 +67,8 @@ import org.opensearch.watcher.ResourceWatcherService;
  * Plugin class for Query Insights.
  */
 public class QueryInsightsPlugin extends Plugin implements ActionPlugin, TelemetryAwarePlugin {
+    private QueryInsightsService queryInsightsService;           // <— keep references
+    private SearchOperationListener shardTapListener;
     /**
      * Default constructor
      */
@@ -86,7 +93,7 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
         // initialize operational metrics counters
         OperationalMetricsCounter.initialize(clusterService.getClusterName().toString(), metricsRegistry);
         // create top n queries service
-        final QueryInsightsService queryInsightsService = new QueryInsightsService(
+        this.queryInsightsService = new QueryInsightsService(
             clusterService,
             threadPool,
             client,
@@ -95,7 +102,18 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
             new QueryInsightsExporterFactory(client, clusterService),
             new QueryInsightsReaderFactory(client)
         );
-        return List.of(queryInsightsService, new QueryInsightsListener(clusterService, queryInsightsService, false));
+        this.shardTapListener = new ShardTapListener(queryInsightsService, clusterService);
+        return List.of(
+            queryInsightsService,
+            new QueryInsightsListener(clusterService, queryInsightsService, false)
+        );
+    }
+
+    @Override
+    public void onIndexModule(IndexModule module) {               // <— register shard listener
+        if (shardTapListener != null) {
+            module.addSearchOperationListener(shardTapListener);
+        }
     }
 
     @Override
@@ -128,7 +146,8 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
         return List.of(
             new ActionPlugin.ActionHandler<>(TopQueriesAction.INSTANCE, TransportTopQueriesAction.class),
             new ActionPlugin.ActionHandler<>(HealthStatsAction.INSTANCE, TransportHealthStatsAction.class),
-            new ActionPlugin.ActionHandler<>(LiveQueriesAction.INSTANCE, TransportLiveQueriesAction.class)
+            new ActionPlugin.ActionHandler<>(LiveQueriesAction.INSTANCE, TransportLiveQueriesAction.class),
+            new ActionHandler<>(InsightsShardPhaseEventAction.INSTANCE, TransportInsightsShardPhaseEventAction.class)
         );
     }
 

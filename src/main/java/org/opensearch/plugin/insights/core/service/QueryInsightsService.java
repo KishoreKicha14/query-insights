@@ -42,6 +42,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.admin.cluster.state.ClusterStateRequest;
 import org.opensearch.action.support.IndicesOptions;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
@@ -66,11 +67,17 @@ import org.opensearch.plugin.insights.rules.model.MetricType;
 import org.opensearch.plugin.insights.rules.model.SearchQueryRecord;
 import org.opensearch.plugin.insights.rules.model.healthStats.QueryInsightsHealthStats;
 import org.opensearch.plugin.insights.rules.model.healthStats.TopQueriesHealthStats;
+import org.opensearch.plugin.insights.rules.action.shard_phase_event.InsightsShardPhaseEventAction;
+import org.opensearch.plugin.insights.rules.transport.shard_phase_event.ShardPhaseEventRequest;
 import org.opensearch.plugin.insights.settings.QueryInsightsSettings;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.threadpool.Scheduler;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
+import org.opensearch.core.index.shard.ShardId;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Service responsible for gathering, analyzing, storing and exporting
@@ -723,5 +730,168 @@ public class QueryInsightsService extends AbstractLifecycleComponent {
      */
     public void setQueryShapeGenerator(final QueryShapeGenerator queryShapeGenerator) {
         this.queryShapeGenerator = queryShapeGenerator;
+    }
+
+    private static final class ReqPhaseKey {
+        final long corrId; final String phase;
+        ReqPhaseKey(long c, String p) { corrId=c; phase=p; }
+        @Override public boolean equals(Object o){ if(this==o)return true; if(!(o instanceof ReqPhaseKey))return false;
+            ReqPhaseKey k=(ReqPhaseKey)o; return corrId==k.corrId && java.util.Objects.equals(phase,k.phase);}
+        @Override public int hashCode(){ return java.util.Objects.hash(corrId, phase);}
+    }
+    public static final class ShardPhaseSpan {
+        public final String phase; public final ShardId shardId; public final String nodeId;
+        public final long startMs; public final long endMs;
+        public ShardPhaseSpan(String phase, ShardId shardId, String nodeId, long startMs, long endMs) {
+            this.phase=phase; this.shardId=shardId; this.nodeId=nodeId; this.startMs=startMs; this.endMs=endMs;
+        }
+    }
+
+    // in-flight partials keyed by (corrId, phase, shardId)
+    private static final class SpanKey {
+        final long corrId; final String phase; final ShardId shardId;
+        SpanKey(long c, String p, ShardId s){corrId=c; phase=p; shardId=s;}
+        @Override public boolean equals(Object o){ if(this==o)return true; if(!(o instanceof SpanKey))return false;
+            SpanKey k=(SpanKey)o; return corrId==k.corrId && java.util.Objects.equals(phase,k.phase) && java.util.Objects.equals(shardId,k.shardId);}
+        @Override public int hashCode(){ return java.util.Objects.hash(corrId, phase, shardId);}
+    }
+
+    private final ConcurrentHashMap<SpanKey, Partial> partials = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ReqPhaseKey, ConcurrentLinkedQueue<ShardPhaseSpan>> completed = new ConcurrentHashMap<>();
+
+    // --- keep your keys and span types as-is ---
+
+    private static final class Partial {
+        volatile long startMs = -1L;  // -1 = not set yet
+        volatile long endMs   = -1L;  // -1 = not set yet
+        final String nodeId;
+        Partial(String nodeId){ this.nodeId = nodeId; }
+    }
+
+
+
+
+    public void recordShardPhaseStart(String phase, ShardId shardId, String nodeId, long corrId, long startMs) {
+        SpanKey key = new SpanKey(corrId, phase, shardId);
+        Partial p = partials.computeIfAbsent(key, k -> new Partial(nodeId));
+
+        // was: if (p.startMs == 0L || startMs < p.startMs)
+        if (p.startMs < 0L || startMs < p.startMs) {
+            p.startMs = startMs;
+        }
+
+        // was: if (p.endMs > 0L)
+        if (p.endMs >= 0L) {
+            partials.remove(key);
+            completed
+                .computeIfAbsent(new ReqPhaseKey(corrId, phase), k -> new ConcurrentLinkedQueue<>())
+                .offer(new ShardPhaseSpan(phase, shardId, p.nodeId, p.startMs, p.endMs));
+        }
+
+
+        if (logger.isInfoEnabled()) {
+            logger.info("[INSIGHTS][coord] START  phase={}  shard={} node={} time={}",
+                phase, shardId.getIndexName() + "[" + shardId.getId() + "]", nodeId,
+                java.time.Instant.ofEpochMilli(p.startMs));
+        }
+    }
+
+    public void recordShardPhaseEnd(String phase, ShardId shardId, String nodeId, long corrId, long endMs) {
+        SpanKey key = new SpanKey(corrId, phase, shardId);
+        Partial p = partials.computeIfAbsent(key, k -> new Partial(nodeId));
+
+        // keep this
+        if (endMs > p.endMs) {
+            p.endMs = endMs;
+        }
+
+        // was: if (p.startMs > 0L)
+        if (p.startMs >= 0L) {
+            partials.remove(key);
+            completed
+                .computeIfAbsent(new ReqPhaseKey(corrId, phase), k -> new ConcurrentLinkedQueue<>())
+                .offer(new ShardPhaseSpan(phase, shardId, p.nodeId, p.startMs, p.endMs));
+
+            if (logger.isInfoEnabled()) {
+                logger.info("[INSIGHTS][coord] END    phase={}  shard={} node={} start={} end={}",
+                    phase, shardId.getIndexName() + "[" + shardId.getId() + "]", nodeId,
+                    java.time.Instant.ofEpochMilli(p.startMs), java.time.Instant.ofEpochMilli(p.endMs));
+            }
+        }
+
+    }
+
+    public void recordShardPhaseFailure(String phase, ShardId shardId, String nodeId, long corrId, long atMs) {
+        // Treat as END at the failure instant
+        recordShardPhaseEnd(phase, shardId, nodeId, corrId, atMs);
+    }
+
+    public java.util.List<ShardPhaseSpan> snapshotOpenStarts(long corrId, String phase) {
+        var list = new java.util.ArrayList<ShardPhaseSpan>();
+        for (var e : partials.entrySet()) {
+            var k = e.getKey(); var p = e.getValue();
+            // was: p.startMs > 0L && p.endMs == 0L
+            if (k.corrId == corrId && phase.equals(k.phase) && p.startMs >= 0L && p.endMs < 0L) {
+                list.add(new ShardPhaseSpan(phase, k.shardId, p.nodeId, p.startMs, p.startMs));
+            }
+        }
+        return list;
+    }
+
+    public java.util.List<ShardPhaseSpan> drainShardPhaseSpans(long corrId, String phase) {
+        var q = completed.remove(new ReqPhaseKey(corrId, phase));
+        if (q == null || q.isEmpty()) return java.util.List.of();
+        var out = new java.util.ArrayList<ShardPhaseSpan>(q.size());
+        for (ShardPhaseSpan s; (s = q.poll()) != null; ) out.add(s);
+        return out;
+    }
+
+    public java.util.List<ShardPhaseSpan> snapshotShardPhaseSpans(long corrId, String phase) {
+        var out = new java.util.ArrayList<ShardPhaseSpan>();
+
+        // already-completed spans (do NOT remove)
+        var q = completed.get(new ReqPhaseKey(corrId, phase));
+        if (q != null) out.addAll(q);
+
+        // was: p.startMs != null && p.endMs == null
+        for (var e : partials.entrySet()) {
+            var k = e.getKey(); var p = e.getValue();
+            if (k.corrId == corrId && phase.equals(k.phase) && p.startMs >= 0L && p.endMs < 0L) {
+                out.add(new ShardPhaseSpan(phase, k.shardId, p.nodeId, p.startMs, p.startMs));
+            }
+        }
+        return out;
+    }
+
+    // Convenience: snapshot all phases for one request id
+    public java.util.Map<String, java.util.List<ShardPhaseSpan>> snapshotShardTimelines(long corrId) {
+        var m = new java.util.HashMap<String, java.util.List<ShardPhaseSpan>>();
+        for (String ph : java.util.List.of("query", "fetch", "expand")) {
+            m.put(ph, snapshotShardPhaseSpans(corrId, ph));
+        }
+        return m;
+    }
+
+    // Optional: free memory at the very end of the request
+    public void clearForRequest(long corrId) {
+        completed.keySet().removeIf(k -> k.corrId == corrId);
+        partials.keySet().removeIf(k -> k.corrId == corrId);
+    }
+
+    private Map<String, List<QueryInsightsService.ShardPhaseSpan>> sampleTimelines() {
+        ShardId sid = new ShardId("t1", "_na_", 0);
+        var q = java.util.List.of(
+            new QueryInsightsService.ShardPhaseSpan("query", sid, "n1", 1L, 2L)
+        );
+        return java.util.Map.of(
+            "query", q,
+            "fetch", java.util.List.of(),
+            "expand", java.util.List.of()
+        );
+    }
+
+    public void sendShardPhaseEvent(ShardPhaseEventRequest req,
+                                    ActionListener<AcknowledgedResponse> l) {
+        client.execute(InsightsShardPhaseEventAction.INSTANCE, req, l);
     }
 }

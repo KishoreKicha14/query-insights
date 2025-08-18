@@ -22,6 +22,7 @@ import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceStats;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceUsage;
+import org.opensearch.plugin.insights.core.service.QueryInsightsService;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesAction;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesRequest;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesResponse;
@@ -44,11 +45,13 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
     private static final String TOTAL = "total";
 
     private final Client client;
+    private final QueryInsightsService insights;
 
     @Inject
-    public TransportLiveQueriesAction(final TransportService transportService, final Client client, final ActionFilters actionFilters) {
+    public TransportLiveQueriesAction(final TransportService transportService, final Client client, final ActionFilters actionFilters, final QueryInsightsService insights ) {
         super(LiveQueriesAction.NAME, transportService, actionFilters, LiveQueriesRequest::new, ThreadPool.Names.GENERIC);
         this.client = client;
+        this.insights = insights;
     }
 
     @Override
@@ -71,6 +74,7 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
                         if (!taskInfo.getAction().startsWith("indices:data/read/search")) {
                             continue;
                         }
+
                         long timestamp = taskInfo.getStartTime();
                         String nodeId = taskInfo.getTaskId().getNodeId();
                         long runningNanos = taskInfo.getRunningTimeNanos();
@@ -81,14 +85,11 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
                         long cpuNanos = 0L;
                         long memBytes = 0L;
                         TaskResourceStats stats = taskInfo.getResourceStats();
-                        if (stats != null) {
-                            Map<String, TaskResourceUsage> usageInfo = stats.getResourceUsageInfo();
-                            if (usageInfo != null) {
-                                TaskResourceUsage totalUsage = usageInfo.get(TOTAL);
-                                if (totalUsage != null) {
-                                    cpuNanos = totalUsage.getCpuTimeInNanos();
-                                    memBytes = totalUsage.getMemoryInBytes();
-                                }
+                        if (stats != null && stats.getResourceUsageInfo() != null) {
+                            TaskResourceUsage total = stats.getResourceUsageInfo().get(TOTAL);
+                            if (total != null) {
+                                cpuNanos = total.getCpuTimeInNanos();
+                                memBytes = total.getMemoryInBytes();
                             }
                         }
                         measurements.put(MetricType.CPU, new Measurement(cpuNanos));
@@ -101,6 +102,15 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
                             attributes.put(Attribute.IS_CANCELLED, taskInfo.isCancelled());
                         }
 
+                        // ---- NEW: add shard timelines (even when verbose=false) ----
+                        long corrId = taskInfo.getParentTaskId().isSet()
+                            ? taskInfo.getParentTaskId().getId()
+                            : taskInfo.getTaskId().getId();
+
+                        var timelines = insights.snapshotShardTimelines(corrId);
+                        attributes.put(Attribute.SHARD_TIMELINES, toWireTimelines(timelines)); // see helper below
+                        // ------------------------------------------------------------
+
                         SearchQueryRecord record = new SearchQueryRecord(
                             timestamp,
                             measurements,
@@ -109,6 +119,7 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
                         );
                         allFilteredRecords.add(record);
                     }
+
 
                     // Sort descending by the requested metric and apply size limit in one pass
                     List<SearchQueryRecord> finalRecords = allFilteredRecords.stream()
@@ -129,4 +140,25 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
             }
         });
     }
+
+    private static Map<String, List<Map<String, Object>>> toWireTimelines(
+        Map<String, List<QueryInsightsService.ShardPhaseSpan>> snap
+    ) {
+        Map<String, List<Map<String, Object>>> out = new HashMap<>();
+        for (var e : snap.entrySet()) {
+            String phase = e.getKey();
+            List<Map<String, Object>> arr = new ArrayList<>(e.getValue().size());
+            for (var s : e.getValue()) {
+                Map<String, Object> one = new HashMap<>();
+                one.put("shard", s.shardId.getIndexName() + "[" + s.shardId.getId() + "]");
+                one.put("node_id", s.nodeId);
+                one.put("start_ms", s.startMs);
+                one.put("end_ms",   s.endMs);
+                arr.add(one);
+            }
+            out.put(phase, arr);
+        }
+        return out;
+    }
+
 }
