@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.admin.cluster.node.tasks.list.ListTasksRequest;
@@ -113,7 +114,7 @@ public class TransportLiveQueriesAction extends HandledTransportAction<LiveQueri
                         }
                         attributes.put(Attribute.WLM_GROUP_ID, wlmGroupId);
                         String targetWlmGroupId = request.getWlmGroupId();
-                        if (targetWlmGroupId != null && !targetWlmGroupId.equals(wlmGroupId)) {
+                        if (targetWlmGroupId != null && !Objects.equals(targetWlmGroupId, wlmGroupId)) {
                             // skip if this task's wlm group does not match user requested wlm group
                             continue;
                         }
