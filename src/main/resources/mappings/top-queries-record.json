@@ -92,44 +92,6 @@
     "source_truncated" : {
       "type" : "boolean"
     },
-    "task_resource_usages" : {
-      "properties" : {
-        "action" : {
-          "type" : "text",
-          "fields" : {
-            "keyword" : {
-              "type" : "keyword",
-              "ignore_above" : 256
-            }
-          }
-        },
-        "nodeId" : {
-          "type" : "text",
-          "fields" : {
-            "keyword" : {
-              "type" : "keyword",
-              "ignore_above" : 256
-            }
-          }
-        },
-        "parentTaskId" : {
-          "type" : "long"
-        },
-        "taskId" : {
-          "type" : "long"
-        },
-        "taskResourceUsage" : {
-          "properties" : {
-            "cpu_time_in_nanos" : {
-              "type" : "long"
-            },
-            "memory_in_bytes" : {
-              "type" : "long"
-            }
-          }
-        }
-      }
-    },
     "measurements": {
       "properties": {
         "latency": {

@@ -44,9 +44,11 @@ import org.opensearch.core.tasks.resourcetracker.TaskResourceInfo;
 import org.opensearch.plugin.insights.core.auth.PrincipalExtractor;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetric;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetricsCounter;
+import org.opensearch.plugin.insights.core.service.FinishedQueriesCache;
 import org.opensearch.plugin.insights.core.service.QueryInsightsService;
 import org.opensearch.plugin.insights.core.service.categorizer.QueryShapeGenerator;
 import org.opensearch.plugin.insights.rules.model.Attribute;
+import org.opensearch.plugin.insights.rules.model.LiveQueryRecord;
 import org.opensearch.plugin.insights.rules.model.Measurement;
 import org.opensearch.plugin.insights.rules.model.MetricType;
 import org.opensearch.plugin.insights.rules.model.SearchQueryRecord;
@@ -256,12 +258,20 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     @Override
     public void onRequestEnd(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
-        constructSearchQueryRecord(context, searchRequestContext);
+        String sharedRecordId = java.util.UUID.randomUUID().toString();
+        constructSearchQueryRecord(context, searchRequestContext, sharedRecordId);
+        if (!skipSearchRequest(searchRequestContext)) {
+            captureFinishedQuery(context, searchRequestContext, sharedRecordId);
+        }
     }
 
     @Override
     public void onRequestFailure(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
-        constructSearchQueryRecord(context, searchRequestContext);
+        String sharedRecordId = java.util.UUID.randomUUID().toString();
+        constructSearchQueryRecord(context, searchRequestContext, sharedRecordId);
+        if (!skipSearchRequest(searchRequestContext)) {
+            captureFinishedQuery(context, searchRequestContext, sharedRecordId);
+        }
     }
 
     private boolean skipSearchRequest(final SearchRequestContext searchRequestContext) {
@@ -298,7 +308,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return excludedIndicesPattern.stream().anyMatch(pattern -> pattern.matcher(indexName).matches());
     }
 
-    private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
+    private void constructSearchQueryRecord(
+        final SearchPhaseContext context,
+        final SearchRequestContext searchRequestContext,
+        final String recordId
+    ) {
         if (skipSearchRequest(searchRequestContext)) {
             return;
         }
@@ -394,13 +408,79 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 measurements,
                 attributes,
                 request.source(),
-                null
+                recordId
             );
             queryInsightsService.addRecord(record);
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
             log.error(String.format(Locale.ROOT, "fail to ingest query insight data, error: %s", e));
         }
+    }
+
+    private void captureFinishedQuery(SearchPhaseContext context, SearchRequestContext searchRequestContext, String recordId) {
+        FinishedQueriesCache cache = queryInsightsService.getFinishedQueriesCache();
+        if (cache == null) {
+            return;
+        }
+
+        List<TaskResourceInfo> tasksResourceUsages = searchRequestContext.getPhaseResourceUsage();
+
+        long cpuNanos = 0L;
+        long memBytes = 0L;
+        long taskId = context.getTask().getId();
+        String nodeId = clusterService.localNode().getId();
+
+        for (TaskResourceInfo taskInfo : tasksResourceUsages) {
+            cpuNanos += taskInfo.getTaskResourceUsage().getCpuTimeInNanos();
+            memBytes += taskInfo.getTaskResourceUsage().getMemoryInBytes();
+            if (taskInfo.getParentTaskId() == -1) {
+                taskId = taskInfo.getTaskId();
+                nodeId = taskInfo.getNodeId();
+            }
+        }
+
+        long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - searchRequestContext.getAbsoluteStartNanos());
+        String taskIdStr = nodeId + ":" + taskId;
+        String description = context.getRequest().source() != null ? context.getRequest().source().toString() : "";
+        boolean isCancelled = context.getTask().isCancelled();
+        String wlmGroupId = null;
+        String username = null;
+        String[] userRoles = null;
+
+        if (context.getTask() instanceof org.opensearch.wlm.WorkloadGroupTask workloadTask) {
+            wlmGroupId = workloadTask.getWorkloadGroupId();
+        }
+
+        if (principalExtractor != null) {
+            try {
+                PrincipalExtractor.UserPrincipalInfo userInfo = principalExtractor.extractUserInfo();
+                if (userInfo != null) {
+                    username = userInfo.getUserName();
+                    if (userInfo.getRoles() != null && !userInfo.getRoles().isEmpty()) {
+                        userRoles = userInfo.getRoles().toArray(new String[0]);
+                    }
+                }
+            } catch (Exception e) {
+                // Ignore
+            }
+        }
+
+        LiveQueryRecord record = new LiveQueryRecord(
+            recordId,
+            context.getRequest().getOrCreateAbsoluteStartMillis(),
+            latencyMs,
+            cpuNanos,
+            memBytes,
+            taskIdStr,
+            clusterService.localNode().getId(),
+            description,
+            isCancelled,
+            wlmGroupId,
+            username,
+            userRoles
+        );
+
+        cache.addFinishedQuery(record);
     }
 
     /**

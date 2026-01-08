@@ -95,6 +95,26 @@ public class QueryInsightsSettings {
     public static final int DEFAULT_LIVE_QUERIES_SIZE = 100;
 
     /**
+     * Default finished query retention in milliseconds (30 seconds)
+     */
+    public static final long DEFAULT_FINISHED_QUERY_RETENTION_MS = 30_000L;
+
+    /**
+     * Tracking inactivity timeout in milliseconds (5 minutes) - fixed value
+     */
+    public static final long TRACKING_INACTIVITY_MS = 300_000L;
+
+    /**
+     * Setting for finished query retention period
+     */
+    public static final Setting<TimeValue> FINISHED_QUERY_RETENTION_PERIOD = Setting.positiveTimeSetting(
+        "search.insights.finished_queries.retention_period",
+        new TimeValue(DEFAULT_FINISHED_QUERY_RETENTION_MS, TimeUnit.MILLISECONDS),
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
      * Default timeout for search requests in query insights operations
      */
     public static final TimeValue DEFAULT_SEARCH_REQUEST_TIMEOUT = new TimeValue(10, TimeUnit.SECONDS);

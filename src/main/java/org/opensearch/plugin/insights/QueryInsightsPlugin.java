@@ -95,7 +95,9 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
             new QueryInsightsExporterFactory(client, clusterService),
             new QueryInsightsReaderFactory(client)
         );
-        return List.of(queryInsightsService, new QueryInsightsListener(clusterService, queryInsightsService, threadPool, false));
+        QueryInsightsListener queryInsightsListener = new QueryInsightsListener(clusterService, queryInsightsService, threadPool, false);
+        queryInsightsService.setQueryInsightsListener(queryInsightsListener);
+        return List.of(queryInsightsService, queryInsightsListener);
     }
 
     @Override
@@ -154,7 +156,8 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
             QueryInsightsSettings.TOP_N_EXPORTER_TYPE,
             QueryInsightsSettings.TOP_N_QUERIES_EXCLUDED_INDICES,
             QueryInsightsSettings.TOP_N_QUERIES_MAX_SOURCE_LENGTH,
-            QueryCategorizationSettings.SEARCH_QUERY_FIELD_TYPE_CACHE_SIZE_KEY
+            QueryCategorizationSettings.SEARCH_QUERY_FIELD_TYPE_CACHE_SIZE_KEY,
+            QueryInsightsSettings.FINISHED_QUERY_RETENTION_PERIOD
         );
     }
 }

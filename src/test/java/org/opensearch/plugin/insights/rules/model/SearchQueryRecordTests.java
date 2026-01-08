@@ -229,7 +229,7 @@ public class SearchQueryRecordTests extends OpenSearchTestCase {
         assertNotNull("Properties field missing in mapping", properties);
 
         // Attributes that are explicitly excluded from serialization and don't need mapping
-        Set<String> excludedAttributes = new HashSet<>(Arrays.asList("top_n_query", "description"));
+        Set<String> excludedAttributes = new HashSet<>(Arrays.asList("top_n_query", "description", "task_id", "task_resource_usages"));
 
         // Check ALL Attribute enum values are mapped (except excluded ones)
         List<String> missingAttributes = new ArrayList<>();

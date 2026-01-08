@@ -278,7 +278,7 @@ public class SearchResponseParserTests extends OpenSearchTestCase {
         for (SearchQueryRecord record : records) {
             SearchQueryRecord convertedRecord = new SearchQueryRecord(record);
 
-            // Convert query_group_hashcode to string
+            // Convert query_group_hashcode to String (as it's parsed from JSON as text)
             Object hashcode = record.getAttributes().get(Attribute.QUERY_GROUP_HASHCODE);
             if (hashcode != null) {
                 convertedRecord.getAttributes().put(Attribute.QUERY_GROUP_HASHCODE, hashcode.toString());

@@ -361,6 +361,13 @@ final public class QueryInsightsTestUtils {
                 if (!Objects.equals(source1, source2)) {
                     return false;
                 }
+            } else if (key == Attribute.QUERY_GROUP_HASHCODE) {
+                // Compare as strings since JSON parsing converts to String
+                String hash1 = value1 != null ? value1.toString() : null;
+                String hash2 = value2 != null ? value2.toString() : null;
+                if (!Objects.equals(hash1, hash2)) {
+                    return false;
+                }
             } else if (value1 instanceof Object[] && value2 instanceof Object[]) {
                 if (!Arrays.deepEquals((Object[]) value1, (Object[]) value2)) {
                     return false;
@@ -411,6 +418,7 @@ final public class QueryInsightsTestUtils {
         clusterSettings.registerSetting(QueryInsightsSettings.TOP_N_QUERIES_EXCLUDED_INDICES);
         clusterSettings.registerSetting(QueryInsightsSettings.TOP_N_QUERIES_MAX_SOURCE_LENGTH);
         clusterSettings.registerSetting(QueryCategorizationSettings.SEARCH_QUERY_METRICS_ENABLED_SETTING);
+        clusterSettings.registerSetting(QueryInsightsSettings.FINISHED_QUERY_RETENTION_PERIOD);
     }
 
     /**
@@ -431,7 +439,9 @@ final public class QueryInsightsTestUtils {
 
             Set<String> requiredFields = new HashSet<>();
             // Fields that are not Attributes or are explicitly excluded from serialization
-            Set<String> excludedFields = new HashSet<>(Arrays.asList("timestamp", "id", "measurements", "top_n_query", "description"));
+            Set<String> excludedFields = new HashSet<>(
+                Arrays.asList("timestamp", "id", "measurements", "top_n_query", "description", "task_resource_usages")
+            );
 
             for (String fieldName : properties.keySet()) {
                 if (!excludedFields.contains(fieldName)) {
