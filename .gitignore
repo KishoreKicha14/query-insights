@@ -10,4 +10,4 @@ out/
 .project
 .settings
 .vscode
-bin/
+bin/plugins/*.zip
