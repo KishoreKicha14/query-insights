@@ -1,3 +1,5 @@
+
+
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -10,7 +12,9 @@ package org.opensearch.plugin.insights;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
+import org.apache.lucene.util.SetOnce;
 import org.opensearch.action.ActionRequest;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -36,6 +40,7 @@ import org.opensearch.plugin.insights.rules.action.health_stats.HealthStatsActio
 import org.opensearch.plugin.insights.rules.action.live_queries.FinishedQueriesAction;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesAction;
 import org.opensearch.plugin.insights.rules.action.live_queries.LiveQueriesUserInfoAction;
+import org.opensearch.plugin.insights.rules.action.report_query.ReportQueryBytesAction;
 import org.opensearch.plugin.insights.rules.action.settings.GetQueryInsightsSettingsAction;
 import org.opensearch.plugin.insights.rules.action.settings.UpdateQueryInsightsSettingsAction;
 import org.opensearch.plugin.insights.rules.action.top_queries.TopQueriesAction;
@@ -48,6 +53,7 @@ import org.opensearch.plugin.insights.rules.transport.health_stats.TransportHeal
 import org.opensearch.plugin.insights.rules.transport.live_queries.TransportFinishedQueriesAction;
 import org.opensearch.plugin.insights.rules.transport.live_queries.TransportLiveQueriesAction;
 import org.opensearch.plugin.insights.rules.transport.live_queries.TransportLiveQueriesUserInfoAction;
+import org.opensearch.plugin.insights.rules.transport.report_query.ReportQueryBytesRequestHandler;
 import org.opensearch.plugin.insights.rules.transport.settings.TransportGetQueryInsightsSettingsAction;
 import org.opensearch.plugin.insights.rules.transport.settings.TransportUpdateQueryInsightsSettingsAction;
 import org.opensearch.plugin.insights.rules.transport.top_queries.TransportTopQueriesAction;
@@ -65,17 +71,48 @@ import org.opensearch.telemetry.tracing.Tracer;
 import org.opensearch.threadpool.ExecutorBuilder;
 import org.opensearch.threadpool.ScalingExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.BytesTransportRequest;
+import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
+import org.opensearch.common.network.NetworkService;
+import org.opensearch.discovery.SeedHostsProvider;
+import org.opensearch.plugins.DiscoveryPlugin;
 
 /**
  * Plugin class for Query Insights.
  */
-public class QueryInsightsPlugin extends Plugin implements ActionPlugin, TelemetryAwarePlugin {
+public class QueryInsightsPlugin extends Plugin implements ActionPlugin, TelemetryAwarePlugin, DiscoveryPlugin {
     /**
      * Default constructor
      */
     public QueryInsightsPlugin() {}
+
+    /**
+     * Holds the Query Insights service so the report-query transport handler can call
+     * {@code addRecord}. Set in {@link #createComponents}.
+     */
+    private final SetOnce<QueryInsightsService> queryInsightsServiceHolder = new SetOnce<>();
+
+    /**
+     * Registers the raw {@link BytesTransportRequest} handler for the report-query channel. Both the
+     * transport service (from {@link #getSeedHostProviders}) and the Query Insights service (from
+     * {@link #createComponents}) must be available; whichever arrives second triggers registration.
+     * The core {@code BytesTransportRequest} type is required so the SQL plugin and Query Insights
+     * share one class identity and same-node delivery is classloader-safe.
+     */
+    private void maybeRegisterReportQueryHandler(final TransportService transportService) {
+        final QueryInsightsService service = queryInsightsServiceHolder.get();
+        if (transportService == null || service == null) {
+            return;
+        }
+        transportService.registerRequestHandler(
+            ReportQueryBytesAction.NAME,
+            ThreadPool.Names.GENERIC,
+            BytesTransportRequest::new,
+            new ReportQueryBytesRequestHandler(service)
+        );
+    }
 
     @Override
     public Collection<Object> createComponents(
@@ -106,7 +143,30 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
             new QueryInsightsReaderFactory(client)
         );
         QueryInsightsListener queryInsightsListener = new QueryInsightsListener(clusterService, queryInsightsService, threadPool);
+        // Expose the service to the report-query transport handler and register the handler if the
+        // transport service is already available (order of node-construction callbacks is not fixed).
+        queryInsightsServiceHolder.set(queryInsightsService);
+        maybeRegisterReportQueryHandler(transportServiceHolder.get());
         return List.of(queryInsightsService, queryInsightsListener);
+    }
+
+    /**
+     * Holds the transport service captured from {@link #getSeedHostProviders}, used only to register
+     * the report-query request handler.
+     */
+    private final SetOnce<TransportService> transportServiceHolder = new SetOnce<>();
+
+    @Override
+    public Map<String, Supplier<SeedHostsProvider>> getSeedHostProviders(
+        final TransportService transportService,
+        final NetworkService networkService
+    ) {
+        // This hook is not about seed hosts; it is the earliest plugin callback that hands us the
+        // TransportService. Capture it and register the report-query handler (see
+        // maybeRegisterReportQueryHandler). Return no providers.
+        transportServiceHolder.set(transportService);
+        maybeRegisterReportQueryHandler(transportService);
+        return Map.of();
     }
 
     @Override
@@ -166,6 +226,7 @@ public class QueryInsightsPlugin extends Plugin implements ActionPlugin, Telemet
             QueryInsightsSettings.TOP_N_MEMORY_QUERIES_ENABLED,
             QueryInsightsSettings.TOP_N_MEMORY_QUERIES_SIZE,
             QueryInsightsSettings.TOP_N_MEMORY_QUERIES_WINDOW_SIZE,
+            QueryInsightsSettings.TOP_N_PPL_QUERIES_ENABLED,
             QueryInsightsSettings.TOP_N_QUERIES_GROUP_BY,
             QueryInsightsSettings.TOP_N_QUERIES_MAX_GROUPS_EXCLUDING_N,
             QueryInsightsSettings.TOP_N_QUERIES_GROUPING_FIELD_NAME,

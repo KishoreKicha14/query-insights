@@ -288,7 +288,16 @@ public class MinMaxHeapQueryGrouper implements QueryGrouper {
         try {
             switch (groupingType) {
                 case SIMILARITY:
-                    return searchQueryRecord.getAttributes().get(Attribute.QUERY_GROUP_HASHCODE).toString();
+                    // A record may legitimately lack a group hashcode — e.g. a PPL/SQL record whose
+                    // producer did not send a shape hash (older SQL plugin), or any record for which
+                    // the shape could not be computed. Guard against null so such a record falls
+                    // through as ungrouped instead of throwing (which previously logged an error per
+                    // record and dropped it from the grouped Top N).
+                    final Object hashcode = searchQueryRecord.getAttributes().get(Attribute.QUERY_GROUP_HASHCODE);
+                    if (hashcode == null) {
+                        return null;
+                    }
+                    return hashcode.toString();
                 case NONE:
                     throw new IllegalArgumentException("Should not try to group queries if grouping type is NONE");
                 default:

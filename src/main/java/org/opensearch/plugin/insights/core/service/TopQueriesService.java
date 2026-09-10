@@ -57,6 +57,7 @@ import org.opensearch.plugin.insights.rules.model.Attribute;
 import org.opensearch.plugin.insights.rules.model.GroupingType;
 import org.opensearch.plugin.insights.rules.model.MetricType;
 import org.opensearch.plugin.insights.rules.model.SearchQueryRecord;
+import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.plugin.insights.rules.model.SourceString;
 import org.opensearch.plugin.insights.rules.model.healthStats.TopQueriesHealthStats;
 import org.opensearch.plugin.insights.settings.QueryInsightsSettings;
@@ -377,6 +378,37 @@ public class TopQueriesService {
     }
 
     /**
+     * Get the child sub-query records of a parent SQL/PPL query from the local index — records whose
+     * {@code derived_from} equals {@code parentMarker}. Used by the detail view to surface a parent's
+     * sub-queries (which are excluded from the Top N overview).
+     *
+     * @param from start timestamp
+     * @param to end timestamp
+     * @param parentMarker the parent query's marker ({@code <source>:<nodeId>:<taskId>})
+     * @param verbose whether to return full output
+     * @param listener listener to be called when child records are fetched
+     */
+    public void getChildrenFromIndex(
+        final String from,
+        final String to,
+        final String parentMarker,
+        final Boolean verbose,
+        final ActionListener<List<SearchQueryRecord>> listener
+    ) {
+        final QueryInsightsReader reader = queryInsightsReaderFactory.getReader(TOP_QUERIES_READER_ID);
+        if (reader == null) {
+            listener.onResponse(new ArrayList<>());
+            return;
+        }
+        try {
+            reader.readChildren(from, to, parentMarker, verbose, listener);
+        } catch (Exception e) {
+            logger.error("Failed to initiate child read from index: ", e);
+            listener.onFailure(e);
+        }
+    }
+
+    /**
      * Consume records to top queries stores
      *
      * @param records a list of {@link SearchQueryRecord}
@@ -433,7 +465,26 @@ public class TopQueriesService {
 
     // Add Source and Source Truncated attributes to record
     public static void setSourceAndTruncation(final SearchQueryRecord record, final int maxSourceLength) {
-        String sourceString = record.getSearchSourceBuilder().toString();
+        // A record ingested from an external source (e.g. a PPL/SQL query reported by the SQL plugin)
+        // has no DSL SearchSourceBuilder. Such a record already carries its originating query text as
+        // SOURCE (set by the report handler). Preserve it: overwriting with an empty string would
+        // blank out the query text in the details view. This matters on the grouping path, which
+        // calls this method unconditionally (unlike the ungrouped drain, which only calls it when
+        // SOURCE is absent). Only NPE-safe fallback to "" when there is neither a builder nor an
+        // existing SOURCE.
+        final SearchSourceBuilder searchSourceBuilder = record.getSearchSourceBuilder();
+        if (searchSourceBuilder == null) {
+            final Object existingSource = record.getAttributes().get(Attribute.SOURCE);
+            if (existingSource != null) {
+                // Keep the already-set source (e.g. PPL/SQL query text); just record that it is not
+                // truncated and leave the value untouched.
+                if (record.getAttributes().get(Attribute.SOURCE_TRUNCATED) == null) {
+                    record.addAttribute(Attribute.SOURCE_TRUNCATED, false);
+                }
+                return;
+            }
+        }
+        String sourceString = searchSourceBuilder == null ? "" : searchSourceBuilder.toString();
         if (maxSourceLength == 0) {
             record.addAttribute(Attribute.SOURCE, new SourceString(""));
             record.addAttribute(Attribute.SOURCE_TRUNCATED, true);

@@ -67,6 +67,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     private static final Logger log = LogManager.getLogger(QueryInsightsListener.class);
 
+    /**
+     * Task header stamped by the SQL/PPL plugin on child DSL searches, carrying the originating
+     * query's {@code <source>:<nodeId>:<taskId>}. Mirrors the SQL/PPL plugin's header name; the two
+     * plugins share no classes, so the constant is duplicated and must stay in sync.
+     */
+    static final String QUERY_INSIGHTS_PARENT_HEADER = "X-Query-Insights-Parent";
+
     private final QueryInsightsService queryInsightsService;
     private final ClusterService clusterService;
     private boolean groupingFieldNameEnabled;
@@ -428,6 +435,27 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 labels.put(Task.X_OPAQUE_ID, userProvidedLabel);
             }
             attributes.put(Attribute.LABELS, labels);
+
+            // If this DSL search was spawned by a SQL/PPL query, the SQL/PPL plugin stamps a parent
+            // marker (<source>:<nodeId>:<taskId>) into the task header. Tag the record so it is
+            // associated with the parent query, classified as DSL, and excluded from the Top N
+            // overview (still available under the parent's detail view / sub-queries).
+            String parentMarker = context.getTask().getHeader(QUERY_INSIGHTS_PARENT_HEADER);
+            if (parentMarker != null && !parentMarker.isEmpty()) {
+                attributes.put(Attribute.QUERY_SOURCE, "DSL");
+                attributes.put(Attribute.DERIVED_FROM, parentMarker);
+                attributes.put(Attribute.IS_CHILD, true);
+                // Mark the child as participating in all metric Top N spaces so it is returned by
+                // the historical read for any metric type (cpu/memory/latency). This is required for
+                // the read-time roll-up of child cpu/memory into the parent to work for cpu- and
+                // memory-typed Top N queries (the parent's own record may only flag some metrics).
+                // Children are still excluded from the ranked overview output via the is_child filter.
+                Map<String, Boolean> childTopN = new HashMap<>();
+                childTopN.put("latency", true);
+                childTopN.put("cpu", true);
+                childTopN.put("memory", true);
+                attributes.put(Attribute.TOP_N_QUERY, childTopN);
+            }
 
             UserPrincipalContext userPrincipalContext = threadPool != null ? new UserPrincipalContext(threadPool) : null;
 

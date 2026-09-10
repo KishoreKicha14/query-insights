@@ -37,6 +37,9 @@ import org.opensearch.plugin.insights.rules.action.top_queries.TopQueries;
 import org.opensearch.plugin.insights.rules.action.top_queries.TopQueriesAction;
 import org.opensearch.plugin.insights.rules.action.top_queries.TopQueriesRequest;
 import org.opensearch.plugin.insights.rules.action.top_queries.TopQueriesResponse;
+import org.opensearch.plugin.insights.rules.model.Attribute;
+import org.opensearch.plugin.insights.rules.model.Measurement;
+import org.opensearch.plugin.insights.rules.model.MetricType;
 import org.opensearch.plugin.insights.rules.model.FilterByMode;
 import org.opensearch.plugin.insights.rules.model.SearchQueryRecord;
 import org.opensearch.plugin.insights.rules.model.recommendations.Recommendation;
@@ -184,6 +187,86 @@ public class TransportTopQueriesAction extends TransportNodesAction<
         }
     }
 
+    /**
+     * Roll up the CPU and memory of child DSL sub-queries into their SQL/PPL parent so a parent's
+     * reported cost reflects its own engine cost plus all its DSL searches.
+     *
+     * <p>Algorithm: first group the child records ({@code is_child == true}) by {@code derived_from}
+     * (the parent marker), summing CPU and memory per group; then, for each parent record (carrying
+     * a {@code parent_marker}), add the matching group's CPU/memory into the parent's measurements.
+     * Latency is NOT summed — the parent already carries its own end-to-end wall-clock latency.
+     *
+     * <p>The passed list must contain BOTH the parents and their children (the historical read
+     * returns both). Child records are left unchanged (their individual costs remain for the detail
+     * view); only parent measurements are augmented. Runs at read time, so it works with records that
+     * were written directly to the index (i.e. that never flowed through the in-memory ingest).
+     *
+     * @param records records fetched for the current window (parents + children)
+     */
+    static void rollUpChildrenIntoParents(final List<SearchQueryRecord> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        // 1) Group children by parent marker, summing cpu + memory.
+        final Map<String, long[]> childTotals = new HashMap<>();
+        for (SearchQueryRecord record : records) {
+            if (!Boolean.TRUE.equals(record.getAttributes().get(Attribute.IS_CHILD))) {
+                continue;
+            }
+            final Object derivedFrom = record.getAttributes().get(Attribute.DERIVED_FROM);
+            if (!(derivedFrom instanceof String) || ((String) derivedFrom).isEmpty()) {
+                continue;
+            }
+            final long[] acc = childTotals.computeIfAbsent((String) derivedFrom, k -> new long[2]);
+            acc[0] += asLong(record.getMeasurement(MetricType.CPU));
+            acc[1] += asLong(record.getMeasurement(MetricType.MEMORY));
+        }
+        if (childTotals.isEmpty()) {
+            return;
+        }
+        // 2) Add each group's totals to the parent whose marker matches.
+        for (SearchQueryRecord record : records) {
+            if (Boolean.TRUE.equals(record.getAttributes().get(Attribute.IS_CHILD))) {
+                continue;
+            }
+            final Object marker = record.getAttributes().get(Attribute.PARENT_MARKER);
+            if (!(marker instanceof String)) {
+                continue;
+            }
+            final long[] acc = childTotals.get((String) marker);
+            if (acc == null) {
+                continue;
+            }
+            // Set the parent's measurement to (own + Σchildren). We compute and set the total
+            // explicitly rather than calling addMeasurement, because these records use aggregation
+            // type NONE, for which addMeasurement REPLACES the value instead of summing it.
+            setTotal(record, MetricType.CPU, acc[0]);
+            setTotal(record, MetricType.MEMORY, acc[1]);
+        }
+    }
+
+    /**
+     * Set {@code record}'s measurement for {@code metricType} to its current value plus {@code add}.
+     * Handles the aggregation-type-NONE case (where {@link SearchQueryRecord#addMeasurement} would
+     * replace rather than add) by reading the current value and writing the sum directly.
+     */
+    private static void setTotal(final SearchQueryRecord record, final MetricType metricType, final long add) {
+        if (add == 0L) {
+            return;
+        }
+        final long own = asLong(record.getMeasurement(metricType));
+        final Measurement existing = record.getMeasurements().get(metricType);
+        if (existing != null) {
+            existing.setMeasurement(own + add);
+        } else {
+            record.getMeasurements().put(metricType, new Measurement(own + add));
+        }
+    }
+
+    private static long asLong(final Number number) {
+        return number == null ? 0L : number.longValue();
+    }
+
     void onHistoricalDataResponse(
         TopQueriesRequest request,
         List<TopQueries> inMemoryTopQueries,
@@ -195,6 +278,28 @@ public class TransportTopQueriesAction extends TransportNodesAction<
         if (historicalRecords != null && !historicalRecords.isEmpty()) {
             // Remove duplicates between in-memory and historical records
             List<SearchQueryRecord> deduplicatedHistoricalRecords = removeDuplicates(inMemoryTopQueries, historicalRecords);
+            // Roll child DSL cpu/memory up into their SQL/PPL parents BEFORE excluding children and
+            // ranking, so the overview ranks parents by their true total cost (own + Σchildren).
+            // Must run while children are still present in the list.
+            //
+            // Only for the overview (id == null). For the detail view (id != null) the roll-up is
+            // done once in appendChildrenAndRespond against the authoritative child fetch; rolling up
+            // here as well would double-count the children into the parent.
+            if (request.getId() == null) {
+                rollUpChildrenIntoParents(deduplicatedHistoricalRecords);
+            }
+            // Exclude child DSL sub-queries of SQL/PPL queries from the Top N overview, mirroring the
+            // in-memory nodeOperation path. Children still live in the index and are surfaced under
+            // the parent query's detail view. When a specific record id is requested (detail view),
+            // do not filter — the caller wants that exact record (and, below, its children).
+            if (request.getId() == null && !deduplicatedHistoricalRecords.isEmpty()) {
+                deduplicatedHistoricalRecords = deduplicatedHistoricalRecords.stream()
+                    .filter(record -> !Boolean.TRUE.equals(record.getAttributes().get(Attribute.IS_CHILD)))
+                    // Re-rank by the requested metric after the roll-up so the ordering reflects the
+                    // rolled-up total (the reader's original sort was on pre-roll-up values).
+                    .sorted((a, b) -> SearchQueryRecord.compare(a, b, request.getMetricType()) * -1)
+                    .collect(Collectors.toList());
+            }
             if (!deduplicatedHistoricalRecords.isEmpty()) {
                 // Pre-compute recommendations for historical records (in-memory records already have them from nodeOperation)
                 Map<String, List<Recommendation>> historicalRecs = Collections.emptyMap();
@@ -211,9 +316,106 @@ public class TransportTopQueriesAction extends TransportNodesAction<
                 combinedTopQueriesList.add(new TopQueries(clusterService.localNode(), deduplicatedHistoricalRecords, historicalRecs));
             }
         }
+
+        // Detail view: when a specific parent id is requested, additionally fetch that parent's child
+        // sub-queries (records whose derived_from == the parent's marker) and append them so the
+        // detail page can render sub-queries. This is additive — the parent record and its
+        // recommendations are already assembled above.
+        if (request.getId() != null) {
+            appendChildrenAndRespond(request, combinedTopQueriesList, inMemoryDataFailures, finalListener);
+            return;
+        }
+
         finalListener.onResponse(
             new TopQueriesResponse(clusterService.getClusterName(), combinedTopQueriesList, inMemoryDataFailures, request.getMetricType())
         );
+    }
+
+    /**
+     * Detail-view path (a specific parent {@code id} was requested). Given the already-assembled
+     * parent record list, fetches the parent's child sub-queries (records whose {@code derived_from}
+     * equals the parent's {@code parent_marker}) and appends them so the detail view can render
+     * sub-queries. Best-effort: if the parent has no marker or the child fetch fails, responds with
+     * the parent record(s) alone.
+     */
+    void appendChildrenAndRespond(
+        TopQueriesRequest request,
+        List<TopQueries> combined,
+        List<FailedNodeException> inMemoryDataFailures,
+        ActionListener<TopQueriesResponse> finalListener
+    ) {
+        // Resolve the requested parent's marker and hold a reference to the parent record so its
+        // cpu/memory can be augmented with the rolled-up child totals once the children are fetched.
+        String parentMarker = null;
+        SearchQueryRecord parentRecord = null;
+        for (TopQueries tq : combined) {
+            if (tq.getTopQueriesRecord() == null) {
+                continue;
+            }
+            for (SearchQueryRecord record : tq.getTopQueriesRecord()) {
+                if (request.getId().equals(record.getId())) {
+                    parentRecord = record;
+                    Object marker = record.getAttributes().get(Attribute.PARENT_MARKER);
+                    if (marker instanceof String) {
+                        parentMarker = (String) marker;
+                    }
+                }
+            }
+        }
+        final SearchQueryRecord parent = parentRecord;
+
+        // No marker (plain DSL query or no parent linkage) → nothing to expand; respond as-is.
+        if (parentMarker == null || parentMarker.isEmpty() || request.getFrom() == null || request.getTo() == null) {
+            finalListener.onResponse(
+                new TopQueriesResponse(clusterService.getClusterName(), combined, inMemoryDataFailures, request.getMetricType())
+            );
+            return;
+        }
+
+        queryInsightsService.getTopQueriesService(request.getMetricType())
+            .getChildrenFromIndex(
+                request.getFrom(),
+                request.getTo(),
+                parentMarker,
+                request.getVerbose(),
+                new ActionListener<List<SearchQueryRecord>>() {
+                    @Override
+                    public void onResponse(List<SearchQueryRecord> children) {
+                        if (children != null && !children.isEmpty()) {
+                            // Fold the children's cpu/memory into the parent so the detail view shows
+                            // the rolled-up total, then append the children for the sub-query list.
+                            if (parent != null) {
+                                List<SearchQueryRecord> parentAndChildren = new ArrayList<>(children.size() + 1);
+                                parentAndChildren.add(parent);
+                                parentAndChildren.addAll(children);
+                                rollUpChildrenIntoParents(parentAndChildren);
+                            }
+                            combined.add(new TopQueries(clusterService.localNode(), children, Collections.emptyMap()));
+                        }
+                        finalListener.onResponse(
+                            new TopQueriesResponse(
+                                clusterService.getClusterName(),
+                                combined,
+                                inMemoryDataFailures,
+                                request.getMetricType()
+                            )
+                        );
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        logger.warn("Failed to fetch child sub-queries for detail view; returning parent only.", e);
+                        finalListener.onResponse(
+                            new TopQueriesResponse(
+                                clusterService.getClusterName(),
+                                combined,
+                                inMemoryDataFailures,
+                                request.getMetricType()
+                            )
+                        );
+                    }
+                }
+            );
     }
 
     void onHistoricalDataFailure(
@@ -353,8 +555,39 @@ public class TransportTopQueriesAction extends TransportNodesAction<
     @Override
     protected TopQueries nodeOperation(final NodeRequest nodeRequest) {
         final TopQueriesRequest request = nodeRequest.request;
-        List<SearchQueryRecord> records = queryInsightsService.getTopQueriesService(request.getMetricType())
+        List<SearchQueryRecord> allRecords = queryInsightsService.getTopQueriesService(request.getMetricType())
             .getTopQueriesRecords(true, request.getFrom(), request.getTo(), request.getId(), request.getVerbose());
+
+        // Roll child DSL cpu/memory up into their SQL/PPL parents while children are still present,
+        // so the in-memory overview reflects the parent's true total cost (own + Σchildren). This
+        // mirrors the historical path (onHistoricalDataResponse). For PPL via the report-query
+        // channel, both parent and children flow through addRecord, so both are present in this
+        // in-memory window.
+        //
+        // Only for the overview (id == null). For the detail view (id != null) the roll-up is done
+        // once in appendChildrenAndRespond against the authoritative child fetch; rolling up here as
+        // well would double-count the children into the parent.
+        if (request.getId() == null) {
+            rollUpChildrenIntoParents(allRecords);
+        }
+
+        // Exclude child DSL sub-queries of SQL/PPL queries from the Top N overview. They remain in
+        // the store and are surfaced under the parent query's detail view (sub-queries). When a
+        // specific record id is requested (detail view), do not filter.
+        List<SearchQueryRecord> records;
+        if (request.getId() != null) {
+            records = allRecords;
+        } else {
+            records = new ArrayList<>(allRecords.size());
+            for (SearchQueryRecord record : allRecords) {
+                if (!Boolean.TRUE.equals(record.getAttributes().get(Attribute.IS_CHILD))) {
+                    records.add(record);
+                }
+            }
+            // Re-rank by the requested metric after the roll-up so the ordering reflects the
+            // rolled-up total rather than the parents' pre-roll-up own cost.
+            records.sort((a, b) -> SearchQueryRecord.compare(b, a, request.getMetricType()));
+        }
 
         if (Boolean.TRUE.equals(request.getRecommendations())) {
             Map<String, List<Recommendation>> recommendationsMap = new HashMap<>();

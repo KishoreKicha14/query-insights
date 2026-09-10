@@ -161,6 +161,58 @@ public final class LocalIndexReader implements QueryInsightsReader {
         executeSearchRequest(indexNames, start, finalEnd, id, verbose, metricType, username, backendRoles, listener);
     }
 
+    @Override
+    public void readChildren(
+        final String from,
+        final String to,
+        final String parentMarker,
+        final Boolean verbose,
+        final ActionListener<List<SearchQueryRecord>> listener
+    ) {
+        if (from == null || to == null || parentMarker == null || parentMarker.isEmpty()) {
+            listener.onResponse(new ArrayList<>());
+            return;
+        }
+        final ZonedDateTime start = ZonedDateTime.parse(from);
+        ZonedDateTime end = ZonedDateTime.parse(to);
+        final ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+        if (end.isAfter(now)) {
+            end = now;
+        }
+        final ZonedDateTime finalEnd = end;
+        final ZonedDateTime retentionTime = now.minusDays(this.deleteAfterDays);
+        final ZonedDateTime effectiveStart = start.isBefore(retentionTime) ? retentionTime : start;
+        if (effectiveStart.isAfter(finalEnd)) {
+            listener.onResponse(Collections.emptyList());
+            return;
+        }
+        final List<String> indexNames = IndexDiscoveryHelper.buildIndexNamesInDateRange(indexPattern, effectiveStart, finalEnd);
+        if (indexNames.isEmpty()) {
+            listener.onResponse(Collections.emptyList());
+            return;
+        }
+        SearchRequest searchRequest = QueryInsightsQueryBuilder.buildChildrenSearchRequest(
+            indexNames,
+            start,
+            finalEnd,
+            parentMarker,
+            verbose
+        );
+        client.search(searchRequest, new ActionListener<SearchResponse>() {
+            @Override
+            public void onResponse(SearchResponse searchResponse) {
+                SearchResponseParser.parseSearchResponse(searchResponse, namedXContentRegistry, listener);
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.LOCAL_INDEX_READER_SEARCH_EXCEPTIONS);
+                logger.error("Failed to search child records in indices {}: ", indexNames, e);
+                listener.onFailure(e);
+            }
+        });
+    }
+
     /**
      * Executes the search request against the discovered indices.
      */
