@@ -136,6 +136,23 @@ public class QueryInsightsSettings {
     public static final String TOP_N_CPU_QUERIES_PREFIX = TOP_N_QUERIES_SETTING_PREFIX + ".cpu";
     /** Default prefix for top N queries by memory feature */
     public static final String TOP_N_MEMORY_QUERIES_PREFIX = TOP_N_QUERIES_SETTING_PREFIX + ".memory";
+
+    /**
+     * Boolean setting for recording PPL queries into Query Insights (Top N). Opt-in (default false).
+     *
+     * <p>Query Insights owns this operator-facing toggle so it sits alongside the other
+     * {@code search.insights.top_queries.*} settings. The SQL/PPL plugin, which performs the actual
+     * recording, reads this setting's value from cluster state by its string key
+     * ({@link #TOP_N_PPL_QUERIES_ENABLED}'s key) — the two plugins do not share classes, so the key
+     * name is the contract between them.
+     */
+    public static final Setting<Boolean> TOP_N_PPL_QUERIES_ENABLED = Setting.boolSetting(
+        TOP_N_QUERIES_SETTING_PREFIX + ".ppl.enabled",
+        false,
+        Setting.Property.Dynamic,
+        Setting.Property.NodeScope
+    );
+
     /**
      * Boolean setting for enabling top queries by latency.
      */

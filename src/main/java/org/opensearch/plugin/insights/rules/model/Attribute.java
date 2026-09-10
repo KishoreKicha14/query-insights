@@ -109,7 +109,37 @@ public enum Attribute {
     /**
      * Indicates if the search request failed during execution.
      */
-    FAILED;
+    FAILED,
+
+    /**
+     * The source language of the query: DSL, SQL, or PPL.
+     */
+    QUERY_SOURCE,
+
+    /**
+     * For a DSL search that is a sub-query of a SQL/PPL query, the originating query's marker in the
+     * form {@code <source>:<nodeId>:<taskId>}. Absent for top-level queries.
+     */
+    DERIVED_FROM,
+
+    /**
+     * Per-phase breakdown for a SQL/PPL query: a list of maps with keys {@code name},
+     * {@code time_ms}, {@code cpu_time_ms}, {@code memory_bytes}.
+     */
+    PHASES,
+
+    /**
+     * Marks a record as a sub-query (child DSL search) of a SQL/PPL query, so it is excluded from
+     * the Top N overview but still available in the parent's detail view.
+     */
+    IS_CHILD,
+
+    /**
+     * For a SQL/PPL parent query record, its own marker {@code <source>:<nodeId>:<taskId>}, which
+     * child DSL records reference via {@link #DERIVED_FROM}. Used to roll child CPU/memory up into
+     * the parent.
+     */
+    PARENT_MARKER;
 
     /**
      * Read an Attribute from a StreamInput

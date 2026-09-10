@@ -62,5 +62,26 @@ public interface QueryInsightsReader extends Closeable {
         read(from, to, id, verbose, metricType, listener);
     }
 
+    /**
+     * Read the child sub-query records of a parent SQL/PPL query — records whose {@code derived_from}
+     * equals {@code parentMarker}. Used by the detail view to surface a parent's sub-queries.
+     * Default implementation returns an empty list for readers that do not support child lookup.
+     *
+     * @param from         start timestamp string
+     * @param to           end timestamp string
+     * @param parentMarker the parent query's marker ({@code <source>:<nodeId>:<taskId>})
+     * @param verbose      whether to return full output
+     * @param listener     listener to be called when the read operation is complete
+     */
+    default void readChildren(
+        final String from,
+        final String to,
+        final String parentMarker,
+        final Boolean verbose,
+        final ActionListener<List<SearchQueryRecord>> listener
+    ) {
+        listener.onResponse(java.util.Collections.emptyList());
+    }
+
     String getId();
 }

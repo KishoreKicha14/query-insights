@@ -161,6 +161,55 @@ public final class LocalIndexReader implements QueryInsightsReader {
         executeSearchRequest(indexNames, start, finalEnd, id, verbose, metricType, username, backendRoles, listener);
     }
 
+    @Override
+    public void readChildren(
+        final String from,
+        final String to,
+        final String parentMarker,
+        final Boolean verbose,
+        final ActionListener<List<SearchQueryRecord>> listener
+    ) {
+        if (parentMarker == null || parentMarker.isEmpty()) {
+            listener.onResponse(new ArrayList<>());
+            return;
+        }
+        // Child sub-queries are uniquely identified by their parent marker (PPL:<nodeId>:<taskId>),
+        // so they must be resolved by marker alone — NOT constrained to the caller's time-picker
+        // window. The detail view's from/to reflects the user's selected range, which frequently does
+        // not line up with the exact instant the parent (and its children) were written; bounding the
+        // child lookup by that window drops children even though the parent was found by id. We
+        // therefore search the full retention window and match on the marker only, letting the marker
+        // (monotonic per node) guarantee we return exactly this parent's children.
+        final ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+        final ZonedDateTime effectiveStart = now.minusDays(this.deleteAfterDays);
+        final ZonedDateTime finalEnd = now;
+        final List<String> indexNames = IndexDiscoveryHelper.buildIndexNamesInDateRange(indexPattern, effectiveStart, finalEnd);
+        if (indexNames.isEmpty()) {
+            listener.onResponse(Collections.emptyList());
+            return;
+        }
+        SearchRequest searchRequest = QueryInsightsQueryBuilder.buildChildrenSearchRequest(
+            indexNames,
+            effectiveStart,
+            finalEnd,
+            parentMarker,
+            verbose
+        );
+        client.search(searchRequest, new ActionListener<SearchResponse>() {
+            @Override
+            public void onResponse(SearchResponse searchResponse) {
+                SearchResponseParser.parseSearchResponse(searchResponse, namedXContentRegistry, listener);
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.LOCAL_INDEX_READER_SEARCH_EXCEPTIONS);
+                logger.error("Failed to search child records in indices {}: ", indexNames, e);
+                listener.onFailure(e);
+            }
+        });
+    }
+
     /**
      * Executes the search request against the discovered indices.
      */

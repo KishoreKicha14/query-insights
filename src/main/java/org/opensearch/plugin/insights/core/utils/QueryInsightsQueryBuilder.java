@@ -126,6 +126,52 @@ public final class QueryInsightsQueryBuilder {
      * @param backendRoles Optional backend roles to filter records by (for RBAC BACKEND_ROLES mode)
      * @return Configured SearchRequest ready for execution
      */
+    /**
+     * Builds a search request that returns the child sub-queries of a parent SQL/PPL query — the
+     * records whose {@code derived_from} equals the parent's marker ({@code <source>:<nodeId>:<taskId>}).
+     * Used by the detail view to surface a parent query's sub-queries. Unlike the Top N query, this
+     * does not filter on {@code top_n_query.<metric>} (children are not ranked) and sorts by
+     * timestamp ascending.
+     *
+     * @param indexNames List of index names to search
+     * @param start Start timestamp for the query range
+     * @param end End timestamp for the query range
+     * @param parentMarker The parent's marker to match against child {@code derived_from}
+     * @param verbose Whether to return full output
+     * @return Configured SearchRequest ready for execution
+     */
+    public static SearchRequest buildChildrenSearchRequest(
+        final List<String> indexNames,
+        final ZonedDateTime start,
+        final ZonedDateTime end,
+        final String parentMarker,
+        final Boolean verbose
+    ) {
+        SearchRequest searchRequest = new SearchRequest(indexNames.toArray(new String[0]));
+        searchRequest.indicesOptions(IndicesOptions.fromOptions(true, true, true, false));
+        searchRequest.requestCache(true);
+
+        RangeQueryBuilder rangeQuery = QueryBuilders.rangeQuery(TIMESTAMP)
+            .from(start.toInstant().toEpochMilli())
+            .to(end.toInstant().toEpochMilli());
+        BoolQueryBuilder query = QueryBuilders.boolQuery()
+            .must(rangeQuery)
+            .must(QueryBuilders.termQuery(Attribute.DERIVED_FROM.toString(), parentMarker));
+
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().size(MAX_TOP_N_INDEX_READ_SIZE);
+        searchSourceBuilder.query(query);
+        if (Boolean.FALSE.equals(verbose)) {
+            searchSourceBuilder.fetchSource(
+                Strings.EMPTY_ARRAY,
+                Arrays.stream(VERBOSE_ONLY_FIELDS).map(Attribute::toString).toArray(String[]::new)
+            );
+        }
+        searchSourceBuilder.sort(SortBuilders.fieldSort(TIMESTAMP).order(SortOrder.ASC));
+        searchSourceBuilder.timeout(DEFAULT_SEARCH_REQUEST_TIMEOUT);
+        searchRequest.source(searchSourceBuilder);
+        return searchRequest;
+    }
+
     public static SearchRequest buildTopNSearchRequest(
         final List<String> indexNames,
         final ZonedDateTime start,

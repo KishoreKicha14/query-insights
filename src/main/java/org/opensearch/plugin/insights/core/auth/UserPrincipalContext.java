@@ -33,6 +33,20 @@ public class UserPrincipalContext {
         this.userString = threadContext != null ? threadContext.getTransient(SECURITY_USER_INFO_THREAD_CONTEXT) : null;
     }
 
+    private UserPrincipalContext(String userString) {
+        this.userString = userString;
+    }
+
+    /**
+     * Build a context from a raw user_info string (same pipe-delimited format the security plugin
+     * writes to the thread context). Used when the string arrives out-of-band — e.g. a PPL/SQL
+     * record reported over the transport layer, where the originating thread's transient is not
+     * available on the receiving thread.
+     */
+    public static UserPrincipalContext fromUserString(String userString) {
+        return new UserPrincipalContext(userString);
+    }
+
     /**
      * Get the raw user string
      * @return raw user string, or null if not available

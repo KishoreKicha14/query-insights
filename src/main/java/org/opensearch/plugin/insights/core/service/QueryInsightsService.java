@@ -253,6 +253,14 @@ public class QueryInsightsService extends AbstractLifecycleComponent {
      * @return true/false
      */
     public boolean addRecord(final SearchQueryRecord record) {
+        // Child DSL sub-queries (spawned by a SQL/PPL parent) are typically fast and would not rank
+        // into the Top N by themselves. They must still be persisted so the parent's detail view can
+        // read them back from the local index as sub-queries. Force-queue any record flagged as a
+        // child, bypassing the Top N ranking gate below.
+        Object isChild = record.getAttributes().get(org.opensearch.plugin.insights.rules.model.Attribute.IS_CHILD);
+        if (Boolean.TRUE.equals(isChild)) {
+            return queryRecordsQueue.offer(record);
+        }
         boolean shouldAdd = isSearchQueryMetricsFeatureEnabled() || isGroupingEnabled();
         if (!shouldAdd) {
             for (Map.Entry<MetricType, TopQueriesService> entry : topQueriesServices.entrySet()) {
