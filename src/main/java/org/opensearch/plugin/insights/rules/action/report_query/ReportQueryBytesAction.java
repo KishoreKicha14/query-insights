@@ -27,7 +27,7 @@ package org.opensearch.plugin.insights.rules.action.report_query;
  * <b>Wire format</b> (carried inside the request bytes; versioned; mirrored on the SQL side — both
  * sides MUST agree):
  * <pre>
- *   vInt    FORMAT_VERSION (=2)
+ *   vInt    FORMAT_VERSION (=1)
  *   String  querySource        (e.g. "PPL")
  *   String  coordinatorId      (parent marker: "&lt;source&gt;:&lt;nodeId&gt;:&lt;taskId&gt;")
  *   String  nodeId
@@ -38,7 +38,8 @@ package org.opensearch.plugin.insights.rules.action.report_query;
  *   vLong   memoryBytes
  *   vInt    indexCount
  *   indexCount x String indexName
- *   String  userInfo           (v2+: "name|backendroles|roles|..."; "" when security is off)
+ *   String  userInfo           ("name|backendroles|roles|..."; "" when security is off)
+ *   boolean failed             (true when the originating PPL/SQL query failed; mirrors FAILED)
  * </pre>
  * The SQL plugin and Query Insights are unreleased and always built together, so this is a single
  * format: any layout change is a coordinated change on both sides, not a compatibility boundary.
@@ -52,7 +53,7 @@ public final class ReportQueryBytesAction {
     public static final String NAME = "cluster:admin/opensearch/query_insights/report_query_bytes";
 
     /** Wire format version. Must match {@code QueryInsightsReporter.FORMAT_VERSION} in the SQL plugin. */
-    public static final int FORMAT_VERSION = 2;
+    public static final int FORMAT_VERSION = 1;
 
     private ReportQueryBytesAction() {}
 }

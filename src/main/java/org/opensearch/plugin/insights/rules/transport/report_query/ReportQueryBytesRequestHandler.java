@@ -101,8 +101,11 @@ public class ReportQueryBytesRequestHandler implements TransportRequestHandler<B
                 indices[i] = in.readString();
             }
 
-            // v2+: user_info string captured from the security plugin on the coordinator.
+            // user_info string captured from the security plugin on the coordinator.
             final String userInfo = in.readString();
+
+            // Mirrors the native listener's Attribute.FAILED so Top N classifies failed queries.
+            final boolean failed = in.readBoolean();
 
             final Map<MetricType, Measurement> measurements = new HashMap<>();
             measurements.put(MetricType.LATENCY, new Measurement(latencyMillis, AggregationType.NONE));
@@ -112,6 +115,7 @@ public class ReportQueryBytesRequestHandler implements TransportRequestHandler<B
             final Map<Attribute, Object> attributes = new HashMap<>();
             attributes.put(Attribute.QUERY_SOURCE, querySource);
             attributes.put(Attribute.NODE_ID, nodeId);
+            attributes.put(Attribute.FAILED, failed);
             // Store the (prefix-stripped) query text as the record's SOURCE so the details view can
             // display the originating PPL/SQL query. Setting it here also prevents the drain-time
             // setSourceAndTruncation from overwriting it with an empty string (it only fills SOURCE
